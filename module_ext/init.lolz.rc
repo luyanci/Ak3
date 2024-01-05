@@ -1,0 +1,11 @@
+# LOLZ Tweaks (2022)
+
+on property:sys.boot_completed=1
+    # Tweak LMK Tunables
+    write /sys/module/lowmemorykiller/parameters/minfree "18350,27525,36700,45875,55050,64225"
+
+    # Image Enhancement
+    write /sys/devices/virtual/graphics/fb0/msm_fb_dispparam "0010"
+    
+    # Script Done
+    write /data/vendor/lolzkernel "LOLZ KERNEL IS THE BEST"

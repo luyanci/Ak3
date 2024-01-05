@@ -1,110 +1,120 @@
-### AnyKernel3 Ramdisk Mod Script
-## osm0sis @ xda-developers
+# AnyKernel3 Ramdisk Mod Script
+# osm0sis @ xda-developers
 
-### AnyKernel setup
-# global properties
+## AnyKernel setup
+# begin properties
 properties() { '
-kernel.string=ExampleKernel by osm0sis @ xda-developers
-do.devicecheck=0
+wlan.type=MODULE
+do.devicecheck=1
 do.modules=0
-do.systemless=1
+do.systemless=0
 do.cleanup=1
 do.cleanuponabort=0
-device.name1=maguro
-device.name2=toro
-device.name3=toroplus
-device.name4=tuna
-device.name5=
-supported.versions=
+device.name1=olive
+device.name2=olivelite
+device.name3=olivewood
+device.name4=olives
+device.name5=pine
+supported.versions=10 - 11
 supported.patchlevels=
-supported.vendorpatchlevels=
 '; } # end properties
 
-
-### AnyKernel install
-## boot files attributes
-boot_attributes() {
-set_perm_recursive 0 0 755 644 $ramdisk/*;
-set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
-} # end attributes
-
-# boot shell variables
-block=auto;
-is_slot_device=auto;
+# shell variables
+block=/dev/block/by-name/boot;
+is_slot_device=0;
 ramdisk_compression=auto;
-patch_vbmeta_flag=auto;
+patch_vbmeta_flag=0;
 
-# import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+## AnyKernel methods (DO NOT CHANGE)
+# import patching functions/variables - see for reference
 . tools/ak3-core.sh;
 
-# boot install
-dump_boot; # use split_boot to skip ramdisk unpack, e.g. for devices with init_boot ramdisk
+mount -o rw,remount /vendor
 
-# init.rc
-backup_file init.rc;
-replace_string init.rc "cpuctl cpu,timer_slack" "mount cgroup none /dev/cpuctl cpu" "mount cgroup none /dev/cpuctl cpu,timer_slack";
+# AnyKernel install
+split_boot;
 
-# init.tuna.rc
-backup_file init.tuna.rc;
-insert_line init.tuna.rc "nodiratime barrier=0" after "mount_all /fstab.tuna" "\tmount ext4 /dev/block/platform/omap/omap_hsmmc.0/by-name/userdata /data remount nosuid nodev noatime nodiratime barrier=0";
-append_file init.tuna.rc "bootscript" init.tuna;
+# patchcmdline but disable prebuilt cam since its miui
+patch_cmdline "oss.cam_hal" "oss.cam_hal=1";
 
-# fstab.tuna
-backup_file fstab.tuna;
-patch_fstab fstab.tuna /system ext4 options "noatime,barrier=1" "noatime,nodiratime,barrier=0";
-patch_fstab fstab.tuna /cache ext4 options "barrier=1" "barrier=0,nomblk_io_submit";
-patch_fstab fstab.tuna /data ext4 options "data=ordered" "nomblk_io_submit,data=writeback";
-append_file fstab.tuna "usbdisk" fstab;
+# patchcmdline but disable dynamic partitions always
+patch_cmdline "dynamic_partitions" "dynamic_partitions=0";
 
-write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_boot ramdisk
-## end boot install
+if mountpoint -q /data; then
+  # Optimize F2FS extension list (@arter97)
+  for list_path in $(find /sys/fs/f2fs* -name extension_list); do
 
+    ui_print "F2FS: Optimizing Extension List..."
 
-## init_boot files attributes
-#init_boot_attributes() {
-#set_perm_recursive 0 0 755 644 $ramdisk/*;
-#set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
-#} # end attributes
+    hot_count="$(grep -n 'hot file extens' $list_path | cut -d':' -f1)"
+    list_len="$(cat $list_path | wc -l)"
+    cold_count="$((list_len - hot_count))"
 
-# init_boot shell variables
-#block=init_boot;
-#is_slot_device=1;
-#ramdisk_compression=auto;
-#patch_vbmeta_flag=auto;
+    cold_list="$(head -n$((hot_count - 1)) $list_path | grep -v ':')"
+    hot_list="$(tail -n$cold_count $list_path)"
 
-# reset for init_boot patching
-#reset_ak;
+    for ext in $cold_list; do
+      [ ! -z $ext ] && echo "[c]!$ext" > $list_path
+    done
 
-# init_boot install
-#dump_boot; # unpack ramdisk since it is the new first stage init ramdisk where overlay.d must go
+    for ext in $hot_list; do
+      [ ! -z $ext ] && echo "[h]!$ext" > $list_path
+    done
 
-#write_boot;
-## end init_boot install
+    for ext in $(cat $home/f2fs-cold.list | grep -v '#'); do
+      [ ! -z $ext ] && echo "[c]$ext" > $list_path
+    done
 
+    for ext in $(cat $home/f2fs-hot.list); do
+      [ ! -z $ext ] && echo "[h]$ext" > $list_path
+    done
+  done
+fi
 
-## vendor_kernel_boot shell variables
-#block=vendor_kernel_boot;
-#is_slot_device=1;
-#ramdisk_compression=auto;
-#patch_vbmeta_flag=auto;
+# add our lil script
+cp -fr $home/module_ext/init.lolz.rc /vendor/etc/init/init.lolz.rc
+chmod 644 /vendor/etc/init/init.lolz.rc
+chown root.root /vendor/etc/init/init.lolz.rc
+chcon u:object_r:vendor_configs_file:s0 /vendor/etc/init/init.lolz.rc
 
-# reset for vendor_kernel_boot patching
-#reset_ak;
+ui_print "F2FS: Replacing fstab.qcom"
+cp -fr $home/module_ext/fstab.qcom /vendor/etc/fstab.qcom
+chmod 644 /vendor/etc/fstab.qcom
 
-# vendor_kernel_boot install
-#split_boot; # skip unpack/repack ramdisk, e.g. for dtb on devices with hdr v4 and vendor_kernel_boot
+mount -o rw,remount /system
+rm -rf /vendor/etc/init/hw/init.qcom.test.rc
+ui_print "Cleaning /system/lib/modules..."
+ui_print "Cleaning /vendor/lib/modules..."
+rm -rf /system/lib/modules/*.ko
+rm -rf /vendor/lib/modules/*.ko
+ui_print "Cleaned Successfully!!"
 
-#flash_boot;
-## end vendor_kernel_boot install
+ui_print "Adding pronto_wlan.ko Module...."
+if [ -d "/vendor/lib/modules" ]; then
+ui_print "/vendor/lib/modules Detected!"
+cp -fr $home/module_ext/pronto_wlan.ko /vendor/lib/modules/
+cp -fr $home/module_ext/README /vendor/lib/modules/
+chmod 644 /vendor/lib/modules/pronto_wlan.ko
+ui_print "Added pronto_wlan.ko Module Successfully"
+elif [ -d "/system/lib/modules" ]; then
+ui_print "/system/lib/modules Detected!"
+cp -fr $home/module_ext/pronto_wlan.ko /system/lib/modules/
+cp -fr $home/anykernel/module_ext/README /system/lib/modules/
+chmod 644 $home/system/lib/modules/pronto_wlan.ko
+ui_print "Added pronto_wlan.ko Module Successfully"
+else
+ui_print "Modules directory not found try installing the builtin WLAN build, aborting.."
+exit
+fi;
 
+flash_boot;
+flash_dtbo;
 
-## vendor_boot files attributes
-#vendor_boot_attributes() {
-#set_perm_recursive 0 0 755 644 $ramdisk/*;
-#set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
-#} # end attributes
+ui_print "Enjoy Using LOLZ KERNEL, Have fun :)"
 
-# vendor_boot shell variables
+## end install
+
+# shell variables
 #block=vendor_boot;
 #is_slot_device=1;
 #ramdisk_compression=auto;
@@ -113,9 +123,9 @@ write_boot; # use flash_boot to skip ramdisk repack, e.g. for devices with init_
 # reset for vendor_boot patching
 #reset_ak;
 
-# vendor_boot install
-#dump_boot; # use split_boot to skip ramdisk unpack, e.g. for dtb on devices with hdr v4 but no vendor_kernel_boot
 
-#write_boot; # use flash_boot to skip ramdisk repack, e.g. for dtb on devices with hdr v4 but no vendor_kernel_boot
+## AnyKernel vendor_boot install
+#split_boot; # skip unpack/repack ramdisk since we don't need vendor_ramdisk access
+
+#flash_boot;
 ## end vendor_boot install
-
