@@ -66,7 +66,7 @@ set_perm_recursive() {
 ### dump_boot functions:
 # split_boot (dump and split image only)
 split_boot() {
-  local splitfail;
+  local dumpfail;
 
   if [ ! -e "$(echo $block | cut -d\  -f1)" ]; then
     abort "Invalid partition. Aborting...";
@@ -82,9 +82,7 @@ split_boot() {
   else
     dd if=$block of=$bootimg $customdd;
   fi;
-  if [ $? != 0 ]; then
-    abort "Dumping image failed. Aborting...";
-  fi;
+  [ $? != 0 ] && dumpfail=1;
 
   mkdir -p $split_img;
   cd $split_img;
@@ -94,7 +92,7 @@ split_boot() {
       $bin/elftool unpack -i $bootimg -o elftool_out;
     fi;
     $bin/unpackelf -i $bootimg;
-    [ $? != 0 ] && splitfail=1;
+    [ $? != 0 ] && dumpfail=1;
     mv -f boot.img-kernel kernel.gz;
     mv -f boot.img-ramdisk ramdisk.cpio.gz;
     mv -f boot.img-cmdline cmdline.txt 2>/dev/null;
@@ -121,7 +119,7 @@ split_boot() {
     grep "Address:" header | cut -c15- > boot.img-addr;
     grep "Point:" header | cut -c15- > boot.img-ep;
     $bin/dumpimage -p 0 -o kernel.gz boot-trimmed.img;
-    [ $? != 0 ] && splitfail=1;
+    [ $? != 0 ] && dumpfail=1;
     case $(cat boot.img-type) in
       Multi) $bin/dumpimage -p 1 -o ramdisk.cpio.gz boot-trimmed.img;;
       RAMDisk) mv -f kernel.gz ramdisk.cpio.gz;;
@@ -129,15 +127,15 @@ split_boot() {
   elif [ -f "$bin/rkcrc" ]; then
     dd bs=4096 skip=8 iflag=skip_bytes conv=notrunc if=$bootimg of=ramdisk.cpio.gz;
   else
-    (set -o pipefail; $bin/magiskboot unpack -h $bootimg 2>&1 | tee infotmp >&2);
+    $bin/magiskboot unpack -h $bootimg;
     case $? in
-      1) splitfail=1;;
+      1) dumpfail=1;;
       2) touch chromeos;;
     esac;
   fi;
 
-  if [ $? != 0 -o "$splitfail" ]; then
-    abort "Splitting image failed. Aborting...";
+  if [ $? != 0 -o "$dumpfail" ]; then
+    abort "Dumping/splitting image failed. Aborting...";
   fi;
   cd $home;
 }
@@ -195,10 +193,6 @@ repack_ramdisk() {
   local comp packfail mtktype;
 
   cd $home;
-  if [ "$ramdisk_compression" != "auto" ] && [ "$(grep HEADER_VER $split_img/infotmp | sed -n 's;.*\[\(.*\)\];\1;p')" -gt 3 ]; then
-    ui_print " " "Warning: Only lz4-l ramdisk compression is allowed with hdr v4+ images. Resetting to auto...";
-    ramdisk_compression=auto;
-  fi;
   case $ramdisk_compression in
     auto|"") comp=$(ls $split_img/ramdisk.cpio.* 2>/dev/null | grep -v 'mtk' | rev | cut -d. -f1 | rev);;
     none|cpio) comp="";;
@@ -361,15 +355,12 @@ flash_boot() {
             echo "Attempting kernel unpack with busybox $comp..." >&2;
             $comp -dc $kernel > kernel;
           fi;
-          strings kernel > stringstmp 2>/dev/null;
-          if grep -q -E '^/data/adb/ksud$' stringstmp; then
+          if strings kernel 2>/dev/null | grep -q -E '^/data/adb/ksud$'; then
             touch $home/kernelsu_patched;
-            grep -E -m1 'Linux version.*#' stringstmp > $home/vertmp;
-            [ -d $ramdisk/overlay.d ] && ui_print " " "Warning: overlay.d detected in ramdisk but not currently supported by KernelSU!";
+            strings kernel 2>/dev/null | grep -E -m1 'Linux version.*#' > $home/vertmp;
           else
             ui_print " " "Warning: No KernelSU support detected in kernel!";
           fi;
-          rm -f stringstmp;
           if [ "$comp" ]; then
             $bin/magiskboot compress=$comp kernel kernel.$comp;
             if [ $? != 0 ] && $comp --help 2>/dev/null; then
@@ -395,11 +386,11 @@ flash_boot() {
       *) export PATCHVBMETAFLAG=false;;
     esac;
     $bin/magiskboot repack $nocompflag $bootimg $home/boot-new.img;
+    unset PATCHVBMETAFLAG;
   fi;
   if [ $? != 0 ]; then
     abort "Repacking image failed. Aborting...";
   fi;
-  [ "$PATCHVBMETAFLAG" ] && unset PATCHVBMETAFLAG;
   [ -f .magisk ] && touch $home/magisk_patched;
 
   cd $home;
@@ -410,23 +401,16 @@ flash_boot() {
     fi;
     [ $? != 0 ] && signfail=1;
   fi;
-  if [ -d "$bin/avb" ]; then
+  if [ -f "$bin/boot_signer-dexed.jar" -a -d "$bin/avb" ]; then
     pk8=$(ls $bin/avb/*.pk8);
     cert=$(ls $bin/avb/*.x509.*);
     case $block in
-      *recovery*|*RECOVERY*|*SOS*) avbtype=recovery;;
+      *recovery*|*SOS*) avbtype=recovery;;
       *) avbtype=boot;;
     esac;
-    if [ -f "$bin/boot_signer-dexed.jar" ]; then
-      if [ -f /system/bin/dalvikvm ] && [ "$(/system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature -verify boot.img 2>&1 | grep VALID)" ]; then
-        echo "Signing with AVBv1 /$avbtype..." >&2;
-        /system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature /$avbtype boot-new.img $pk8 $cert boot-new-signed.img;
-      fi;
-    else
-      if $bin/magiskboot verify boot.img; then
-        echo "Signing with AVBv1 /$avbtype..." >&2;
-        $bin/magiskboot sign /$avbtype boot-new.img $cert $pk8;
-      fi;
+    if [ -f /system/bin/dalvikvm ] && [ "$(/system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature -verify boot.img 2>&1 | grep VALID)" ]; then
+      echo "Signing with AVBv1..." >&2;
+      /system/bin/dalvikvm -Xnoimage-dex2oat -cp $bin/boot_signer-dexed.jar com.android.verity.BootSignature /$avbtype boot-new.img $pk8 $cert boot-new-signed.img;
     fi;
   fi;
   if [ $? != 0 -o "$signfail" ]; then
@@ -570,7 +554,6 @@ write_boot() {
   flash_generic vendor_boot; # temporary until hdr v4 can be unpacked/repacked fully by magiskboot
   flash_generic vendor_kernel_boot; # temporary until hdr v4 can be unpacked/repacked fully by magiskboot
   flash_generic vendor_dlkm;
-  flash_generic system_dlkm;
   flash_generic dtbo;
 }
 ###
@@ -890,7 +873,7 @@ setup_ak() {
       esac;
       for name in $parttype; do
         for part in $name$slot $name; do
-          if [ "$(grep -w "$part" /proc/mtd 2>/dev/null)" ]; then
+          if [ "$(grep -w "$part" /proc/mtd 2> /dev/null)" ]; then
             mtdmount=$(grep -w "$part" /proc/mtd);
             mtdpart=$(echo $mtdmount | cut -d\" -f2);
             if [ "$mtdpart" == "$part" ]; then
